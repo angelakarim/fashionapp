@@ -56,7 +56,7 @@ export default function UploadZone({
           ref={inputRef}
           id={inputId}
           type="file"
-          accept="image/*"
+          accept="image/jpeg,image/png,image/webp"
           disabled={disabled}
           onChange={(e) => handleFiles(e.target.files)}
           className="sr-only"

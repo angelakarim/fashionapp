@@ -57,6 +57,48 @@ a broken image with no explanation, so both layers guard against it:
 
 Preserve both checks when touching the response path.
 
+### Security model
+
+`/api/tryon` is unauthenticated and each call spends real money upstream (Gemini
+credits), so the route is the trust boundary. Every client-side check is repeated there —
+anything in `page.tsx` is advisory UX, trivially bypassed by POSTing directly.
+
+Enforced in `route.ts`:
+
+- **Two rate limits** (`lib/rateLimit.ts`). `REQUEST_LIMIT` (60/hr) counts every request so
+  the endpoint can't be hammered with malformed payloads; `GENERATION_LIMIT` (8/hr) is
+  *checked* early but only *consumed* immediately before the upstream call, so a validation
+  error doesn't cost a user their generation budget. Keep that check/consume split if you
+  touch it.
+- **Raster types only** — `image/jpeg|png|webp`. Not `image/*`, which would admit
+  `image/svg+xml`; SVG can carry scripts and executes when opened as a top-level document,
+  which the result panel's Download link permits. This applies to the *upstream response* too.
+- **Size caps** — `Content-Length` is rejected before `req.formData()` buffers the body.
+- **The outbound payload is rebuilt from scratch**, so a caller can't inject extra form
+  fields into the n8n workflow.
+- **Upstream error bodies are logged, never returned.** They name internal nodes and
+  configuration. Clients get a generic message.
+
+`lib/rateLimit.ts` is in-memory, so on Vercel it's per-instance and resets on cold start —
+it raises the cost of casual abuse but is not a hard guarantee. Swap in Vercel KV / Upstash
+(atomic `INCR` + `EXPIRE`) for a durable limit; the call signature can stay the same.
+
+### CSP, the nonce, and why the page is `force-dynamic`
+
+`middleware.ts` mints a per-request nonce and sets the CSP; `next.config.ts` carries only the
+static headers. These three files are coupled:
+
+Next.js emits inline `<script>` tags for hydration data. The policy uses
+`'nonce-…' 'strict-dynamic'` rather than `'unsafe-inline'`, and Next.js can only stamp that
+nonce onto its scripts **while rendering dynamically** — hence `export const dynamic =
+"force-dynamic"` in `app/page.tsx`, which is why the UI lives in `components/TryOnApp.tsx`
+(route segment config can't be exported from a `"use client"` file).
+
+Remove `force-dynamic` and the page is prerendered without nonces; `strict-dynamic` then
+blocks every script and the page loads looking correct but completely inert. **This does not
+reproduce in `npm run dev`** — verify CSP changes against `npm run build && npm start`, and
+check that the announcement bar countdown is ticking (it only renders after hydration).
+
 ### Uploads are downscaled before they leave the browser
 
 `lib/resizeImage.ts` re-encodes each image to max 1600px on the long edge as JPEG via canvas.
