@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
+cp .env.example .env.local   # first-time setup; fill in TRYON_WEBHOOK_URL
 npm run dev      # dev server; falls back to :3001 if :3000 is taken by another local app
 npm run build    # production build — also the only type-check/lint gate in this repo
 npm start        # serve the production build
