@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import AnnouncementBar from "@/components/AnnouncementBar";
 import SiteHeader from "@/components/SiteHeader";
 import UploadZone from "@/components/UploadZone";
@@ -12,7 +13,8 @@ const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
 /** Must stay under the API's per-file cap after downscaling. */
 const MAX_UPLOAD_BYTES = 6 * 1024 * 1024;
 
-export default function TryOnApp() {
+export default function TryOnApp({ displayName }: { displayName: string }) {
+  const router = useRouter();
   const [image1, setImage1] = useState<File | null>(null);
   const [image2, setImage2] = useState<File | null>(null);
   const [preview1, setPreview1] = useState<string | null>(null);
@@ -91,6 +93,14 @@ export default function TryOnApp() {
 
       const res = await fetch("/api/tryon", { method: "POST", body: formData });
 
+      // The session can lapse while the page sits open. Send the user back to
+      // sign in rather than showing a generic failure they can't act on.
+      if (res.status === 401) {
+        router.push("/login?next=/");
+        router.refresh();
+        return;
+      }
+
       if (!res.ok) {
         const detail = await res.text().catch(() => "");
         throw new Error(detail || `Request failed (${res.status}).`);
@@ -114,7 +124,7 @@ export default function TryOnApp() {
   return (
     <main className="min-h-screen">
       <AnnouncementBar />
-      <SiteHeader />
+      <SiteHeader displayName={displayName} />
 
       {/* Page heading — mirrors the "NEW ARRIVALS" block */}
       <div className="px-6 pt-10 pb-6">

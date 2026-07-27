@@ -1,4 +1,5 @@
 import { checkLimit, consumeLimit, clientKey } from "@/lib/rateLimit";
+import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -67,16 +68,32 @@ export async function POST(req: Request) {
     return fail("The service is not available right now.", 503);
   }
 
-  // Generation costs real money upstream (Gemini credits), so an unauthenticated
-  // endpoint needs a throttle or anyone who finds the URL can drain the quota.
-  const client = clientKey(req);
+  // Keyed by IP and applied before the auth lookup, so an anonymous flood is
+  // turned away without spending a round trip to the auth server on each hit.
+  const ip = clientKey(req);
 
-  const flood = consumeLimit(`req:${client}`, REQUEST_LIMIT, RATE_WINDOW_MS);
+  const flood = consumeLimit(`req:${ip}`, REQUEST_LIMIT, RATE_WINDOW_MS);
   if (!flood.ok) {
     return fail("Too many requests. Please try again later.", 429, {
       "Retry-After": String(flood.retryAfterSeconds),
     });
   }
+
+  // Generation costs real money upstream (Gemini credits), so the endpoint is
+  // restricted to signed-in users. getUser() revalidates the token against the
+  // auth server rather than trusting the cookie, which a caller controls.
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return fail("Please sign in to generate a try-on.", 401);
+  }
+
+  // Quota follows the account, not the IP: a shared office NAT shouldn't pool
+  // one budget, and a user shouldn't reset theirs by switching networks.
+  const client = user.id;
 
   // Checked (not spent) up front so an over-quota caller is turned away before
   // uploading megabytes. The slot is consumed just before the upstream call.

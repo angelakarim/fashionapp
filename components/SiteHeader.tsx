@@ -49,7 +49,7 @@ function IconBag() {
   );
 }
 
-export default function SiteHeader() {
+export default function SiteHeader({ displayName }: { displayName: string }) {
   return (
     <header className="border-b border-hairline">
       <div className="flex items-center gap-8 px-6 py-4">
@@ -57,8 +57,12 @@ export default function SiteHeader() {
           ATELIER
         </span>
 
-        <nav className="hidden flex-1 md:block">
-          <ul className="flex flex-wrap items-center gap-6">
+        {/* The full nav needs ~818px and never shrinks (the items are fixed
+            words), so it appears only at xl where wordmark + nav + account
+            controls fit on one line. Below that it wraps to a second row and
+            the header reads as broken — flex-nowrap makes that impossible. */}
+        <nav className="hidden min-w-0 flex-1 overflow-hidden xl:block">
+          <ul className="flex flex-nowrap items-center gap-6 whitespace-nowrap">
             {NAV.map((item) => (
               <li key={item}>
                 <span
@@ -76,9 +80,29 @@ export default function SiteHeader() {
           </ul>
         </nav>
 
-        <div className="ml-auto flex items-center gap-5 text-ink md:ml-0">
+        <div className="ml-auto flex shrink-0 items-center gap-5 text-ink">
           <IconSearch />
-          <IconAccount />
+
+          <span className="flex items-center gap-2">
+            <IconAccount />
+            {/* Hidden on phones, where the row is tightest and the icon alone
+                still communicates "account". */}
+            <span className="hidden max-w-[160px] truncate text-xs font-medium tracking-widest uppercase sm:inline">
+              {displayName}
+            </span>
+          </span>
+
+          {/* A plain form, not fetch(): sign-out still works if the client
+              bundle fails, and POST keeps it un-triggerable by a stray <img>. */}
+          <form action="/auth/signout" method="post">
+            <button
+              type="submit"
+              className="text-xs font-medium tracking-widest uppercase underline underline-offset-4 hover:opacity-70"
+            >
+              Sign Out
+            </button>
+          </form>
+
           <IconHeart />
           <IconBag />
         </div>

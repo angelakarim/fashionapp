@@ -1,3 +1,5 @@
+import { redirect } from "next/navigation";
+import { createClient } from "@/lib/supabase/server";
 import TryOnApp from "@/components/TryOnApp";
 
 /**
@@ -8,11 +10,30 @@ import TryOnApp from "@/components/TryOnApp";
  * dynamically. A statically prerendered page would ship without nonces, and
  * 'strict-dynamic' would then block every script — leaving the page inert.
  *
- * The cost is negligible here: the UI below is a client component that does
- * all of its work in the browser.
+ * Reading the session below makes this dynamic regardless, but the export stays
+ * as the explicit, load-bearing reason.
  */
 export const dynamic = "force-dynamic";
 
-export default function Page() {
-  return <TryOnApp />;
+export default async function Page() {
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  // The middleware already redirects signed-out visitors. This repeats the
+  // check because a page that renders the studio must never depend on the
+  // matcher config being correct.
+  if (!user) redirect("/login");
+
+  // RLS restricts this to the caller's own row, so no filter is load-bearing
+  // for security — the .eq() is just to select a single row.
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("name")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  return <TryOnApp displayName={profile?.name || user.email || "Account"} />;
 }

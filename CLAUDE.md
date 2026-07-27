@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-cp .env.example .env.local   # first-time setup; fill in TRYON_WEBHOOK_URL
+cp .env.example .env.local   # first-time setup; fill in TRYON_WEBHOOK_URL + the two Supabase vars
 npm run dev      # dev server; falls back to :3001 if :3000 is taken by another local app
 npm run build    # production build — also the only type-check/lint gate in this repo
 npm start        # serve the production build
@@ -57,16 +57,53 @@ a broken image with no explanation, so both layers guard against it:
 
 Preserve both checks when touching the response path.
 
+### Authentication
+
+Supabase Auth, email + password. The whole app is behind it: `middleware.ts` redirects any
+signed-out request to `/login?next=…`, and `/api/tryon` answers `401` rather than redirecting
+(an XHR bounced to an HTML page surfaces as an unparseable response).
+
+`auth.users` holds the credentials and is not client-writable, so the display name lives in
+`public.profiles` (`id` → `auth.users.id`, `name`, `email`). The name is passed to `signUp()` as
+`options.data.name`, which Supabase stores on `raw_user_meta_data`; the `on_auth_user_created`
+trigger copies it into `profiles` **inside the signup transaction**, so a user can never exist
+without a profile. RLS on `profiles` allows select/update of your own row only, and there is
+deliberately **no INSERT policy** — rows come from the trigger, so a client can't forge a profile
+for an id it doesn't own.
+
+Three clients, because cookie handling differs by context — don't collapse them:
+
+| File | Used by |
+|---|---|
+| `lib/supabase/client.ts` | browser (`AuthForm`) |
+| `lib/supabase/server.ts` | Server Components, Route Handlers |
+| `lib/supabase/middleware.ts` | `middleware.ts` session refresh |
+
+Always `getUser()`, never `getSession()`, on the server: it revalidates the token with the auth
+server instead of trusting a cookie the caller controls.
+
+`refreshSession()` returns cookies rather than a `Response` (unlike the shape in the Supabase
+docs) because `middleware.ts` has to attach the CSP nonce to that same response. Keep it that way.
+
+Note the project rejects signups from non-deliverable email domains, so `@example.com` and similar
+placeholders fail with `email_address_invalid` — test with a real address. If "Confirm email" is
+enabled (Authentication → Providers → Email), `signUp()` returns a user with **no session**;
+`AuthForm` handles that by telling the user to check their inbox.
+
 ### Security model
 
-`/api/tryon` is unauthenticated and each call spends real money upstream (Gemini
+`/api/tryon` requires a session and each call spends real money upstream (Gemini
 credits), so the route is the trust boundary. Every client-side check is repeated there —
 anything in `page.tsx` is advisory UX, trivially bypassed by POSTing directly.
 
 Enforced in `route.ts`:
 
-- **Two rate limits** (`lib/rateLimit.ts`). `REQUEST_LIMIT` (60/hr) counts every request so
-  the endpoint can't be hammered with malformed payloads; `GENERATION_LIMIT` (8/hr) is
+- **Auth**, before anything expensive but *after* the IP flood limit — otherwise an
+  anonymous flood costs a round trip to the auth server per hit.
+- **Two rate limits** (`lib/rateLimit.ts`). `REQUEST_LIMIT` (60/hr) is keyed by **IP** and
+  counts every request so the endpoint can't be hammered with malformed payloads;
+  `GENERATION_LIMIT` (8/hr) is keyed by **user id** — quota follows the account, so a shared
+  NAT doesn't pool one budget and a user can't reset theirs by switching networks. It is
   *checked* early but only *consumed* immediately before the upstream call, so a validation
   error doesn't cost a user their generation budget. Keep that check/consume split if you
   touch it.
@@ -86,7 +123,15 @@ it raises the cost of casual abuse but is not a hard guarantee. Swap in Vercel K
 ### CSP, the nonce, and why the page is `force-dynamic`
 
 `middleware.ts` mints a per-request nonce and sets the CSP; `next.config.ts` carries only the
-static headers. These three files are coupled:
+static headers. These three files are coupled.
+
+Two auth-related constraints on the policy:
+
+- `connect-src` must list `NEXT_PUBLIC_SUPABASE_URL`. The browser client calls Supabase Auth
+  directly, so `'self'` alone silently blocks every sign-in.
+- `form-action 'self'` is what lets the header's sign-out form POST to `/auth/signout`.
+
+And on the rendering side:
 
 Next.js emits inline `<script>` tags for hydration data. The policy uses
 `'nonce-…' 'strict-dynamic'` rather than `'unsafe-inline'`, and Next.js can only stamp that
@@ -98,6 +143,16 @@ Remove `force-dynamic` and the page is prerendered without nonces; `strict-dynam
 blocks every script and the page loads looking correct but completely inert. **This does not
 reproduce in `npm run dev`** — verify CSP changes against `npm run build && npm start`, and
 check that the announcement bar countdown is ticking (it only renders after hydration).
+
+`app/login/page.tsx` needs `force-dynamic` for the same reason, and the stakes are higher: an
+inert login form is a locked door. Every route must show `ƒ` (Dynamic), not `○`, in the
+`npm run build` output. A quick check that the nonce landed:
+
+```bash
+curl -s -D /tmp/h -o /tmp/p http://localhost:3000/login
+grep -c '<script' /tmp/p                                   # must equal the nonce'd count below
+grep -o "<script[^>]*nonce=\"$(grep -oiP "nonce-\K[^']+" /tmp/h | head -1)\"" /tmp/p | wc -l
+```
 
 ### Uploads are downscaled before they leave the browser
 
