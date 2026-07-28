@@ -97,12 +97,13 @@ export async function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     // Static assets and the image optimizer don't need a per-request nonce.
-    {
-      source: "/((?!_next/static|_next/image|favicon.ico).*)",
-      missing: [
-        { type: "header", key: "next-router-prefetch" },
-        { type: "header", key: "purpose", value: "prefetch" },
-      ],
-    },
+    // No `missing:` clause excluding prefetch requests here. The CSP examples
+    // in the Next.js docs skip middleware when `next-router-prefetch` or
+    // `purpose: prefetch` is present, to avoid burning a nonce on a response
+    // that may be cached. Those headers are just request headers, though —
+    // anyone can send them with curl, and doing so would skip the session
+    // check and the CSP entirely. The auth gate has to run on every request,
+    // so the exclusion is deliberately omitted.
+    "/((?!_next/static|_next/image|favicon.ico).*)",
   ],
 };

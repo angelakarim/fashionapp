@@ -63,6 +63,11 @@ Supabase Auth, email + password. The whole app is behind it: `middleware.ts` red
 signed-out request to `/login?next=…`, and `/api/tryon` answers `401` rather than redirecting
 (an XHR bounced to an HTML page surfaces as an unparseable response).
 
+The middleware matcher must not carry the `missing: [next-router-prefetch, purpose=prefetch]`
+clause from the Next.js CSP docs. Those are ordinary request headers, so sending either one
+skips middleware — and with it the session check and the CSP. `app/page.tsx` repeats the
+`getUser()` check for the same reason: the gate can't rest on the matcher alone.
+
 `auth.users` holds the credentials and is not client-writable, so the display name lives in
 `public.profiles` (`id` → `auth.users.id`, `name`, `email`). The name is passed to `signUp()` as
 `options.data.name`, which Supabase stores on `raw_user_meta_data`; the `on_auth_user_created`
@@ -150,7 +155,9 @@ inert login form is a locked door. Every route must show `ƒ` (Dynamic), not `�
 
 ```bash
 curl -s -D /tmp/h -o /tmp/p http://localhost:3000/login
-grep -c '<script' /tmp/p                                   # must equal the nonce'd count below
+# Both counts must match. Use `grep -o | wc -l`, not `grep -c` — the built HTML is
+# a single line, so `grep -c` reports 1 no matter how many script tags there are.
+grep -o '<script' /tmp/p | wc -l
 grep -o "<script[^>]*nonce=\"$(grep -oiP "nonce-\K[^']+" /tmp/h | head -1)\"" /tmp/p | wc -l
 ```
 
