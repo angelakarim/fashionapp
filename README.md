@@ -47,9 +47,11 @@ directly, and the publishable key only grants what row-level security allows.
 `SUPABASE_SECRET_KEY` is the `service_role` key, which **bypasses RLS entirely**. It is the one
 deliberate exception to the rule that this key never appears in the project, and it exists for a
 single reason: Stripe's webhook arrives with no session, so there is no `auth.uid()` for RLS to
-match, and `public.subscriptions` has no write policy on purpose. It is imported only by
-`lib/supabase/admin.ts`, which is imported only by `app/api/stripe/webhook/route.ts` and
-`app/billing/success/route.ts`. Never give it a `NEXT_PUBLIC_` prefix.
+match, and `public.subscriptions` has no write policy on purpose. It is read only by
+`lib/supabase/admin.ts`, which is imported only by `lib/subscriptionSync.ts`, which in turn is
+imported only by `app/api/stripe/webhook/route.ts` and `app/billing/success/route.ts`. Keeping
+that chain short is what limits the damage if it ever leaks — read-only checks live in
+`lib/entitlement.ts` and never touch it. Never give it a `NEXT_PUBLIC_` prefix.
 
 Use the n8n `/webhook/` path, which stays live while the workflow is Active. The editor's
 `/webhook-test/` path also works but must be re-armed with "Execute workflow" before *every*
@@ -182,6 +184,10 @@ in the build output.
 
 Next.js is auto-detected. There is no `vercel.json` and none is needed.
 
+Currently deployed at **https://fashionapp-git-main-angela-95b5.vercel.app**, and the Stripe
+Payment Link and webhook endpoint both point there. That is a Vercel *branch alias*, so it always
+follows `main`; attaching a custom domain later means repointing both Stripe URLs again.
+
 1. Import the repository at [vercel.com/new](https://vercel.com/new).
 2. Add all seven environment variables above, for **Production and Preview**, before the first
    build. A missing one fails the build rather than deploying something broken.
@@ -200,7 +206,6 @@ Three limits to know before relying on it in production:
   immediately (`lib/entitlement.ts` allows a 3-day grace past `current_period_end`), but a
   cancelled subscriber keeps access until that window closes and a renewing one loses it after.
   Check Developers → Webhooks for 4xx/5xx deliveries after any domain change.
-
 - Rate limiting (`lib/rateLimit.ts`) is in-memory, so limits are **per-instance and reset on cold
   start**. It raises the cost of casual abuse but is not a hard guarantee; a durable limit needs
   Vercel KV or Upstash.
@@ -224,10 +229,18 @@ app/api/tryon        402 without an active subscription           (trust boundar
 ```
 
 Payment flows in from two directions, both landing in the same idempotent
-`syncSubscription()` in `lib/entitlement.ts`: `/billing/success` verifies the checkout session
+`syncSubscription()` in `lib/subscriptionSync.ts`: `/billing/success` verifies the checkout session
 against Stripe when the customer is redirected back (immediate, works on localhost), and
 `/api/stripe/webhook` handles everything the customer isn't present for — renewals, failed cards,
 cancellations.
+
+The billing routes, all `runtime = "nodejs"`:
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/billing/success` | GET | Where the Payment Link returns. Grants access immediately after verifying the session against Stripe and confirming `client_reference_id` matches the signed-in user |
+| `/api/stripe/webhook` | POST | Stripe's view of a subscription, mirrored into Supabase. Signature-verified; `middleware.ts` skips this path so the unauthenticated POST costs no session lookup |
+| `/billing/portal` | POST | Opens Stripe's hosted portal so a subscriber can change their card or cancel. Nothing in this app can cancel a subscription itself |
 
 - `app/page.tsx` holds all application state; `components/` is presentational.
 - `app/api/tryon/route.ts` is the trust boundary. Every client-side check is repeated there —

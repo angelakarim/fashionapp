@@ -102,10 +102,12 @@ enabled (Authentication → Providers → Email), `signUp()` returns a user with
 
 ### Billing / the paywall
 
-$9.99/month via a **Stripe Payment Link** — no Stripe.js, no embedded Checkout. That choice is
-why the CSP needed no changes: a Payment Link is a top-level navigation, which CSP doesn't
-restrict. The CTA in `components/Paywall.tsx` must stay an `<a href>`; a `<form action="https://…">`
-would be blocked by `form-action 'self'`.
+$9.99/month via a **Stripe Payment Link** — no Stripe.js, no embedded Checkout. That keeps the
+CSP almost untouched: a Payment Link is a top-level navigation, which CSP doesn't restrict, so
+no `script-src`/`frame-src`/`connect-src` entries were needed. The CTA in
+`components/Paywall.tsx` must stay an `<a href>`; a `<form action="https://…">` would be blocked
+by `form-action`. The one CSP change the paywall did require is the `billing.stripe.com` entry
+in `form-action` — see the CSP section below.
 
 **Entitlement is not a column on `profiles`.** `profiles_update_own` allows updating *any column
 of your own row*, so a `has_paid` boolean there would be self-grantable from the browser console
@@ -120,7 +122,8 @@ Three gates, and only the last is security:
 | Page | `app/page.tsx` | unsubscribed → `/paywall`. Advisory UX |
 | API | `app/api/tryon/route.ts` | `402`. The real boundary — runs after auth, before the quota check and before `formData()` |
 
-Two write paths, both converging on the idempotent `syncSubscription()` in `lib/entitlement.ts`:
+Two write paths, both converging on the idempotent `syncSubscription()` in
+`lib/subscriptionSync.ts`:
 
 - `app/billing/success/route.ts` — where the Payment Link redirects. Verifies the session against
   the Stripe API and requires `client_reference_id === user.id`, because `session_id` arrives in
@@ -129,6 +132,16 @@ Two write paths, both converging on the idempotent `syncSubscription()` in `lib/
   a renewal, a failed card, or a cancellation. Signature verification is its entire trust
   boundary, so it needs the raw `req.text()` — parsing to JSON first invalidates the signature.
   `middleware.ts` early-returns for this path before `refreshSession()`.
+
+Plus `app/billing/portal/route.ts`, which opens Stripe's hosted portal so a subscriber can
+change their card or cancel. POST-only, like `/auth/signout`. Nothing in this app can cancel a
+subscription itself, so without it the paywall's "cancel anytime" promise is false.
+
+**The read/write split is load-bearing, not stylistic.** `lib/entitlement.ts` holds only
+read helpers (`isActive`, `getSubscription`, `hasAccess`) and runs on the *caller's* RLS-scoped
+client — safe to import from Server Components. `lib/subscriptionSync.ts` holds the
+service-role writes. Merging them would drag `lib/supabase/admin.ts`, and the key that bypasses
+RLS, into every page that only wanted to ask "is this user subscribed?".
 
 `client_reference_id` on the Payment Link URL is the whole mechanism linking Stripe to Supabase.
 Subscription lifecycle events don't carry it (it exists only on the Checkout Session), so
@@ -147,8 +160,17 @@ Two Stripe API details worth not rediscovering:
 **`SUPABASE_SECRET_KEY` is a deliberate exception** to the rule below that the `service_role` key
 must never appear here. The webhook has no session, so there's no `auth.uid()` for RLS to match,
 and `subscriptions` has no write policy by design. Its blast radius is contained by import
-discipline: `lib/supabase/admin.ts` is imported **only** by the two billing routes. Never import
-it from a Server Component, a `"use client"` file, or anything in `components/`.
+discipline:
+
+```
+lib/supabase/admin.ts  ←  lib/subscriptionSync.ts  ←  app/api/stripe/webhook/route.ts
+                                                   ←  app/billing/success/route.ts
+```
+
+That is the entire graph, and it should stay that way. Verify with
+`grep -rn "supabase/admin\|subscriptionSync" --include="*.ts*" .` after touching these files —
+the chain is easy to extend by accident, since a single `hasAccess` import from the wrong module
+is enough to pull the key's module into a page's graph.
 
 ### Security model
 

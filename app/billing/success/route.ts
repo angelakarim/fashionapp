@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { stripe } from "@/lib/stripe";
-import { syncSubscription } from "@/lib/entitlement";
+import { syncSubscription } from "@/lib/subscriptionSync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

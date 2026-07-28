@@ -1,6 +1,6 @@
 import type Stripe from "stripe";
 import { stripe, STRIPE_WEBHOOK_SECRET } from "@/lib/stripe";
-import { resolveUserId, syncSubscription } from "@/lib/entitlement";
+import { resolveUserId, syncSubscription } from "@/lib/subscriptionSync";
 
 export const runtime = "nodejs";
 

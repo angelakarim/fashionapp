@@ -1,6 +1,14 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type Stripe from "stripe";
-import { createAdminClient } from "@/lib/supabase/admin";
+
+/**
+ * Read-only entitlement checks, safe to import from anywhere that renders.
+ *
+ * Everything here runs on the *caller's* Supabase client, so the select-own RLS
+ * policy is what restricts the data. The service-role writes deliberately live
+ * in lib/subscriptionSync.ts instead: importing them from here would drag
+ * lib/supabase/admin.ts — and the key that bypasses RLS — into every Server
+ * Component that only wanted to ask "is this user subscribed?".
+ */
 
 /**
  * Subscription states that grant access. `past_due` is deliberately excluded:
@@ -69,92 +77,4 @@ export async function hasAccess(
   userId: string
 ): Promise<boolean> {
   return isActive(await getSubscription(supabase, userId));
-}
-
-/**
- * As of API version 2026-06-24.dahlia, `current_period_end` was removed from
- * the Subscription object and lives on each subscription item instead. A
- * subscription can hold several items; the latest end is the one that governs
- * access.
- */
-function periodEnd(subscription: Stripe.Subscription): string | null {
-  const ends = subscription.items.data
-    .map((item) => item.current_period_end)
-    .filter((value): value is number => typeof value === "number");
-
-  if (ends.length === 0) return null;
-  return new Date(Math.max(...ends) * 1000).toISOString();
-}
-
-function idOf(value: string | { id: string } | null): string | null {
-  if (!value) return null;
-  return typeof value === "string" ? value : value.id;
-}
-
-/**
- * Mirrors a Stripe subscription into `public.subscriptions`.
- *
- * Called from both the webhook and the post-checkout return handler, which is
- * why it upserts rather than inserts: a duplicate webhook delivery, a page
- * refresh on the return URL, and a renewal months later all land here and must
- * converge on the same row. `user_id` is the conflict target because the app
- * grants access per user, not per subscription.
- *
- * Uses the service-role client — `public.subscriptions` has no write policy.
- */
-export async function syncSubscription(
-  userId: string,
-  subscription: Stripe.Subscription
-): Promise<void> {
-  const admin = createAdminClient();
-
-  const { error } = await admin.from("subscriptions").upsert(
-    {
-      user_id: userId,
-      stripe_customer_id: idOf(subscription.customer),
-      stripe_subscription_id: subscription.id,
-      status: subscription.status,
-      price_id: subscription.items.data[0]?.price.id ?? null,
-      current_period_end: periodEnd(subscription),
-      cancel_at_period_end: subscription.cancel_at_period_end,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "user_id" }
-  );
-
-  if (error) {
-    // Thrown so the webhook answers non-2xx and Stripe retries the delivery.
-    throw new Error(`Failed to sync subscription: ${error.message}`);
-  }
-}
-
-/**
- * Resolves the app user behind a Stripe subscription.
- *
- * Subscription lifecycle events (renewal, cancellation) carry no
- * `client_reference_id` — that only exists on the Checkout Session. So the
- * link is recovered two ways: from metadata stamped onto the subscription at
- * checkout, and failing that from the customer id recorded on the first sync.
- *
- * Returns null when neither is available, which happens if a subscription
- * event arrives before its checkout.session.completed. That is safe to ignore:
- * the checkout event creates the row moments later.
- */
-export async function resolveUserId(
-  subscription: Stripe.Subscription
-): Promise<string | null> {
-  const fromMetadata = subscription.metadata?.supabase_user_id;
-  if (fromMetadata) return fromMetadata;
-
-  const customerId = idOf(subscription.customer);
-  if (!customerId) return null;
-
-  const admin = createAdminClient();
-  const { data } = await admin
-    .from("subscriptions")
-    .select("user_id")
-    .eq("stripe_customer_id", customerId)
-    .maybeSingle();
-
-  return data?.user_id ?? null;
 }
