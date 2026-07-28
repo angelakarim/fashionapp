@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-cp .env.example .env.local   # first-time setup; fill in TRYON_WEBHOOK_URL + the two Supabase vars
+cp .env.example .env.local   # first-time setup; seven vars — n8n, three Supabase, three Stripe
 npm run dev      # dev server; falls back to :3001 if :3000 is taken by another local app
 npm run build    # production build — also the only type-check/lint gate in this repo
 npm start        # serve the production build
@@ -19,6 +19,8 @@ type-checks; run it before considering work done.
 A single-page virtual try-on tool. The user uploads two images (a person and a garment), the app
 POSTs them as `multipart/form-data` to an n8n webhook, and the webhook returns a **binary image**
 — not JSON — which is rendered from an object URL.
+
+Access is a **$9.99/month Stripe subscription**. Signup is free; generating is not.
 
 ## Architecture
 
@@ -68,6 +70,9 @@ clause from the Next.js CSP docs. Those are ordinary request headers, so sending
 skips middleware — and with it the session check and the CSP. `app/page.tsx` repeats the
 `getUser()` check for the same reason: the gate can't rest on the matcher alone.
 
+There is no migration checked in; `README.md` carries the schema SQL (table, RLS policies,
+trigger) for setting up a fresh Supabase project. Keep it in sync if the schema changes.
+
 `auth.users` holds the credentials and is not client-writable, so the display name lives in
 `public.profiles` (`id` → `auth.users.id`, `name`, `email`). The name is passed to `signUp()` as
 `options.data.name`, which Supabase stores on `raw_user_meta_data`; the `on_auth_user_created`
@@ -95,6 +100,56 @@ placeholders fail with `email_address_invalid` — test with a real address. If 
 enabled (Authentication → Providers → Email), `signUp()` returns a user with **no session**;
 `AuthForm` handles that by telling the user to check their inbox.
 
+### Billing / the paywall
+
+$9.99/month via a **Stripe Payment Link** — no Stripe.js, no embedded Checkout. That choice is
+why the CSP needed no changes: a Payment Link is a top-level navigation, which CSP doesn't
+restrict. The CTA in `components/Paywall.tsx` must stay an `<a href>`; a `<form action="https://…">`
+would be blocked by `form-action 'self'`.
+
+**Entitlement is not a column on `profiles`.** `profiles_update_own` allows updating *any column
+of your own row*, so a `has_paid` boolean there would be self-grantable from the browser console
+with the publishable key. It lives in `public.subscriptions`, which has a select-own policy and
+**no insert/update/delete policy at all**. Don't add one.
+
+Three gates, and only the last is security:
+
+| Layer | File | Role |
+|---|---|---|
+| Session | `middleware.ts` | signed-out → `/login`. Knows nothing about subscriptions — an entitlement query here would cost a DB round trip on every request |
+| Page | `app/page.tsx` | unsubscribed → `/paywall`. Advisory UX |
+| API | `app/api/tryon/route.ts` | `402`. The real boundary — runs after auth, before the quota check and before `formData()` |
+
+Two write paths, both converging on the idempotent `syncSubscription()` in `lib/entitlement.ts`:
+
+- `app/billing/success/route.ts` — where the Payment Link redirects. Verifies the session against
+  the Stripe API and requires `client_reference_id === user.id`, because `session_id` arrives in
+  a URL the caller controls. This is the path that works on localhost.
+- `app/api/stripe/webhook/route.ts` — the durable one, and the *only* thing that ever learns about
+  a renewal, a failed card, or a cancellation. Signature verification is its entire trust
+  boundary, so it needs the raw `req.text()` — parsing to JSON first invalidates the signature.
+  `middleware.ts` early-returns for this path before `refreshSession()`.
+
+`client_reference_id` on the Payment Link URL is the whole mechanism linking Stripe to Supabase.
+Subscription lifecycle events don't carry it (it exists only on the Checkout Session), so
+`handleCheckoutCompleted` stamps `metadata.supabase_user_id` onto the subscription, and
+`resolveUserId()` falls back to a `stripe_customer_id` lookup.
+
+Two Stripe API details worth not rediscovering:
+
+- As of API version **2026-06-24.dahlia**, `current_period_end` is no longer on the Subscription
+  object — it's on each subscription **item**. `periodEnd()` reads the max across items. Don't
+  pin an older `apiVersion` to "fix" this.
+- `isActive()` excludes `past_due` (a retrying card shouldn't keep spending Gemini credits) but
+  allows a **3-day grace past `current_period_end`**, because a renewal only reaches this
+  database via a webhook and a delayed delivery would otherwise lock out someone who just paid.
+
+**`SUPABASE_SECRET_KEY` is a deliberate exception** to the rule below that the `service_role` key
+must never appear here. The webhook has no session, so there's no `auth.uid()` for RLS to match,
+and `subscriptions` has no write policy by design. Its blast radius is contained by import
+discipline: `lib/supabase/admin.ts` is imported **only** by the two billing routes. Never import
+it from a Server Component, a `"use client"` file, or anything in `components/`.
+
 ### Security model
 
 `/api/tryon` requires a session and each call spends real money upstream (Gemini
@@ -105,6 +160,8 @@ Enforced in `route.ts`:
 
 - **Auth**, before anything expensive but *after* the IP flood limit — otherwise an
   anonymous flood costs a round trip to the auth server per hit.
+- **An active subscription**, immediately after auth and before the quota check, so an
+  unpaid account is turned away before any parsing work.
 - **Two rate limits** (`lib/rateLimit.ts`). `REQUEST_LIMIT` (60/hr) is keyed by **IP** and
   counts every request so the endpoint can't be hammered with malformed payloads;
   `GENERATION_LIMIT` (8/hr) is keyed by **user id** — quota follows the account, so a shared
@@ -134,7 +191,11 @@ Two auth-related constraints on the policy:
 
 - `connect-src` must list `NEXT_PUBLIC_SUPABASE_URL`. The browser client calls Supabase Auth
   directly, so `'self'` alone silently blocks every sign-in.
-- `form-action 'self'` is what lets the header's sign-out form POST to `/auth/signout`.
+- `form-action 'self' https://billing.stripe.com` — `'self'` lets the header's sign-out form
+  POST to `/auth/signout`. The Stripe origin is there because `/billing/portal` answers with a
+  redirect to `billing.stripe.com`, and browsers enforce `form-action` against **every hop of a
+  form's redirect chain**, not just the immediate action. Drop it and the Membership button is
+  blocked with no visible error — the click just does nothing.
 
 And on the rendering side:
 
@@ -173,6 +234,36 @@ original `File` unchanged. Don't make it throw.
 Every `URL.createObjectURL` in `page.tsx` has a matching `revokeObjectURL` — on replace, on clear,
 on regenerate, and on unmount (via a ref that mirrors the current URLs so the cleanup effect can
 stay dependency-free). New object URLs need the same treatment.
+
+## Deployment (Vercel)
+
+Next.js is auto-detected — there is no `vercel.json`, and adding one is not needed.
+
+Seven environment variables must exist in the Vercel project (Production **and** Preview) before
+the first build: `TRYON_WEBHOOK_URL`, `NEXT_PUBLIC_SUPABASE_URL`,
+`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`, `STRIPE_SECRET_KEY`,
+`STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_STRIPE_PAYMENT_LINK`. A missing one fails the build rather
+than shipping a broken deploy — `lib/supabase/env.ts`, `lib/stripe.ts`, and
+`lib/supabase/admin.ts` all throw at module load, by design.
+
+The Stripe **webhook endpoint URL** and the **Payment Link redirect** are configured in the Stripe
+dashboard, not in code, and both hardcode the origin. After any domain change, update them and
+check Developers → Webhooks for failed deliveries — a wrong URL means renewals and cancellations
+stop reaching the app, silently.
+
+Supabase's Site URL and Redirect URLs (Authentication → URL Configuration) have to include the
+deployed origin. Nothing in the code hardcodes an origin, so this is the only place the
+deployment's domain is configured — leave it pointing at `localhost` and confirmation emails
+send users to a dead link.
+
+Two limits worth knowing before relying on it in production:
+
+- `lib/rateLimit.ts` is in-memory, so limits are **per-instance and reset on cold start**. See
+  the security model section — a durable limit needs Vercel KV / Upstash.
+- `maxDuration = 60` in `route.ts` is at the Hobby-plan ceiling. A slow generation times out.
+
+`clientKey()` reads `x-forwarded-for`, which is what the Vercel proxy sets, so IP-keyed limiting
+works behind it. Don't "fix" it to read a socket address.
 
 ## Design system
 

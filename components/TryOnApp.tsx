@@ -101,6 +101,15 @@ export default function TryOnApp({ displayName }: { displayName: string }) {
         return;
       }
 
+      // The subscription can lapse mid-session (a failed renewal, a
+      // cancellation taking effect). Send the user to the paywall rather than
+      // showing an error they can't act on from here.
+      if (res.status === 402) {
+        router.push("/paywall");
+        router.refresh();
+        return;
+      }
+
       if (!res.ok) {
         const detail = await res.text().catch(() => "");
         throw new Error(detail || `Request failed (${res.status}).`);
@@ -124,7 +133,7 @@ export default function TryOnApp({ displayName }: { displayName: string }) {
   return (
     <main className="min-h-screen">
       <AnnouncementBar />
-      <SiteHeader displayName={displayName} />
+      <SiteHeader displayName={displayName} showBilling />
 
       {/* Page heading — mirrors the "NEW ARRIVALS" block */}
       <div className="px-6 pt-10 pb-6">

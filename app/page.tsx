@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { hasAccess } from "@/lib/entitlement";
 import TryOnApp from "@/components/TryOnApp";
 
 /**
@@ -26,6 +27,12 @@ export default async function Page() {
   // check because a page that renders the studio must never depend on the
   // matcher config being correct.
   if (!user) redirect("/login");
+
+  // Signing up is free; generating is not. An account without an active
+  // subscription gets the paywall instead of the studio. This is advisory UX —
+  // /api/tryon repeats the check, and that is what actually protects the
+  // upstream credits.
+  if (!(await hasAccess(supabase, user.id))) redirect("/paywall");
 
   // RLS restricts this to the caller's own row, so no filter is load-bearing
   // for security — the .eq() is just to select a single row.
