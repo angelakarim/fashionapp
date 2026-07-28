@@ -1,5 +1,6 @@
 import { checkLimit, consumeLimit, clientKey } from "@/lib/rateLimit";
 import { createClient } from "@/lib/supabase/server";
+import { hasAccess } from "@/lib/entitlement";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -89,6 +90,16 @@ export async function POST(req: Request) {
 
   if (!user) {
     return fail("Please sign in to generate a try-on.", 401);
+  }
+
+  // The paywall redirect in app/page.tsx is advisory UX, bypassed by POSTing
+  // here directly. This is the check that actually stands between an unpaid
+  // account and a Gemini bill, so it runs before any quota or parsing work.
+  if (!(await hasAccess(supabase, user.id))) {
+    return fail(
+      "An active subscription is required to generate a try-on.",
+      402
+    );
   }
 
   // Quota follows the account, not the IP: a shared office NAT shouldn't pool

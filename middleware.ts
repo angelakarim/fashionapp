@@ -38,6 +38,15 @@ function applyCookies(response: NextResponse, cookies: PendingCookie[]) {
  * they need without enumerating each one.
  */
 export async function middleware(request: NextRequest) {
+  // Stripe posts here with no cookies and no session, so refreshing one would
+  // be a wasted round trip to the auth server on every event — and the route
+  // verifies the Stripe signature itself, which is a stronger check than
+  // anything middleware could apply. Nothing here renders HTML, so it needs no
+  // CSP either.
+  if (request.nextUrl.pathname === "/api/stripe/webhook") {
+    return NextResponse.next();
+  }
+
   // Runs first: it may rewrite request.cookies, and the forwarded request
   // headers are snapshotted below.
   const { user, cookies } = await refreshSession(request);
@@ -56,7 +65,12 @@ export async function middleware(request: NextRequest) {
     "font-src 'self'",
     "object-src 'none'",
     "base-uri 'none'",
-    "form-action 'self'",
+    // 'self' covers the sign-out form. The Stripe origin is required because
+    // /billing/portal answers with a redirect to billing.stripe.com, and
+    // form-action is enforced against every hop of a form's redirect chain —
+    // not just its immediate action. Without it the Membership button is
+    // blocked by the browser and silently does nothing.
+    "form-action 'self' https://billing.stripe.com",
     "frame-ancestors 'none'",
     "upgrade-insecure-requests",
   ].join("; ");

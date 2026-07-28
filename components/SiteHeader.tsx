@@ -49,7 +49,14 @@ function IconBag() {
   );
 }
 
-export default function SiteHeader({ displayName }: { displayName: string }) {
+export default function SiteHeader({
+  displayName,
+  showBilling = false,
+}: {
+  displayName: string;
+  /** Off on the paywall, where there is no subscription to manage yet. */
+  showBilling?: boolean;
+}) {
   return (
     <header className="border-b border-hairline">
       <div className="flex items-center gap-8 px-6 py-4">
@@ -91,6 +98,17 @@ export default function SiteHeader({ displayName }: { displayName: string }) {
               {displayName}
             </span>
           </span>
+
+          {showBilling && (
+            <form action="/billing/portal" method="post">
+              <button
+                type="submit"
+                className="hidden text-xs font-medium tracking-widest uppercase underline underline-offset-4 hover:opacity-70 sm:inline"
+              >
+                Membership
+              </button>
+            </form>
+          )}
 
           {/* A plain form, not fetch(): sign-out still works if the client
               bundle fails, and POST keeps it un-triggerable by a stray <img>. */}
